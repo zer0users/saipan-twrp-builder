@@ -1,0 +1,134 @@
+# .github/workflows/build-twrp.yml
+name: Build TWRP for Motorola Saipan
+
+on:
+  workflow_dispatch:
+    inputs:
+      MANIFEST_BRANCH:
+        description: 'TWRP Manifest Branch'
+        required: true
+        default: 'twrp-11'
+        type: choice
+        options:
+        - twrp-11
+        - twrp-12.1
+
+jobs:
+  build:
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-20.04
+    
+    steps:
+    - name: Check Out
+      uses: actions/checkout@v3
+      
+    - name: Clean Up
+      uses: rokibhasansagar/slimhub_actions@main
+      
+    - name: Set Swap Space
+      uses: pierotofy/set-swap-action@master
+      with:
+        swap-size-gb: 12
+        
+    - name: Prepare Environment
+      run: |
+        export DEBIAN_FRONTEND=noninteractive
+        sudo apt-get update
+        sudo apt-get -y upgrade
+        sudo apt-get -y install gperf gcc-multilib gcc-10-multilib g++-multilib g++-10-multilib libc6-dev lib32ncurses5-dev x11proto-core-dev libx11-dev tree lib32z-dev libgl1-mesa-dev libxml2-utils xsltproc bc ccache lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libwxgtk3.0-gtk3-dev libxml2 lzop pngcrush schedtool squashfs-tools imagemagick libbz2-dev lzma ncftp qemu-user-static libstdc++-10-dev python
+        
+    - name: Install OpenJDK
+      uses: actions/setup-java@v3
+      with:
+        distribution: 'zulu'
+        java-version: '8'
+        
+    - name: Install Git-Repo
+      run: |
+        mkdir ~/bin
+        curl https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+        chmod a+x ~/bin/repo
+        sudo ln -sf ~/bin/repo /usr/bin/repo
+        
+    - name: Initialize Repo
+      run: |
+        mkdir workspace
+        cd workspace
+        echo "workspace-folder=$(pwd)" >> $GITHUB_OUTPUT
+        git config --global user.name "GitHub Actions"
+        git config --global user.email "noreply@github.com"
+        repo init --depth=1 -u https://github.com/minimal-manifest-twrp/platform_manifest_twrp_aosp.git -b ${{ github.event.inputs.MANIFEST_BRANCH }}
+      id: pwd
+      
+    - name: Repo Sync
+      run: |
+        repo sync -j$(nproc --all) --force-sync
+      working-directory: workspace
+      
+    - name: Clone Device Tree
+      run: |
+        git clone https://github.com/motorola-mtk-dev/android_device_motorola_saipan-twrp.git device/motorola/saipan
+      working-directory: workspace
+      
+    - name: Check Build Makefile
+      run: |
+        if [ -f device/motorola/saipan/AndroidProducts.mk ]; then
+          echo "AndroidProducts.mk found"
+          cat device/motorola/saipan/AndroidProducts.mk
+        else
+          echo "AndroidProducts.mk not found, creating one..."
+          echo "PRODUCT_MAKEFILES := \$(LOCAL_DIR)/twrp_saipan.mk" > device/motorola/saipan/AndroidProducts.mk
+          echo "COMMON_LUNCH_CHOICES := twrp_saipan-eng" >> device/motorola/saipan/AndroidProducts.mk
+        fi
+        
+        if [ -f device/motorola/saipan/twrp_saipan.mk ]; then
+          echo "twrp_saipan.mk found"
+        else
+          echo "Creating basic twrp_saipan.mk..."
+          cat > device/motorola/saipan/twrp_saipan.mk << 'EOF'
+$(call inherit-product, vendor/twrp/config/common.mk)
+$(call inherit-product, device/motorola/saipan/device.mk)
+
+PRODUCT_DEVICE := saipan
+PRODUCT_NAME := twrp_saipan
+PRODUCT_BRAND := motorola
+PRODUCT_MODEL := Moto G50 5G
+PRODUCT_MANUFACTURER := motorola
+
+PRODUCT_GMS_CLIENTID_BASE := android-motorola
+EOF
+        fi
+      working-directory: workspace
+      
+    - name: Building Recovery
+      run: |
+        source build/envsetup.sh
+        export ALLOW_MISSING_DEPENDENCIES=true
+        export FOX_USE_TWRP_RECOVERY_IMAGE_BUILDER=1
+        export LC_ALL="C"
+        lunch twrp_saipan-eng
+        make clean
+        mka bootimage -j$(nproc --all)
+      working-directory: workspace
+      
+    - name: Upload to Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          workspace/out/target/product/saipan/boot.img
+          workspace/out/target/product/saipan/recovery.img
+        name: TWRP for Motorola Saipan - ${{ github.run_id }}
+        tag_name: ${{ github.run_id }}
+        body: |
+          ## TWRP Recovery for Motorola Moto G50 5G (Saipan)
+          **Build Date:** ${{ github.run_id }}
+          **Manifest Branch:** ${{ github.event.inputs.MANIFEST_BRANCH }}
+          
+          ### Installation:
+          ```bash
+          fastboot flash recovery recovery.img
+          ```
+          
+          ⚠️ **Warning:** This is an unofficial build. Use at your own risk!
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
